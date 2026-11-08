@@ -64,6 +64,56 @@ def parse_box(j):
     if not rec["p"]: raise ValueError("no player rows parsed (unexpected ESPN format)")
     return rec
 
+POSG = {"PG": "Guards", "SG": "Guards", "G": "Guards", "SF": "Forwards", "PF": "Forwards", "F": "Forwards", "C": "Centers"}
+KEYS = ["PTS", "REB", "AST", "FG3", "STL", "BLK", "TOV", "PR", "PA", "RA", "PRA"]
+
+def stat_vec(r):  # r[4:11] = pts reb ast fg3 stl blk tov
+    p, rb, a, t3, st, bl, tv = r[4:11]
+    return [p, rb, a, t3, st, bl, tv, p + rb, p + a, rb + a, p + rb + a]
+
+def parse_roster(j):
+    """ESPN team roster -> {player id: position abbreviation}. Players without a listed position are skipped, never guessed."""
+    out = {}
+    for a in (j or {}).get("athletes") or []:
+        for x in (a.get("items") if isinstance(a, dict) and "items" in a else [a]):
+            pos = (x.get("position") or {}).get("abbreviation")
+            if x.get("id") and pos: out[int(x["id"])] = pos
+    return out
+
+def get_positions(store):
+    if store.get("pos") and time.time() - store.get("posTs", 0) < 7 * 86400: return  # rosters change slowly
+    teams = fetch(f"{BASE}/teams")["sports"][0]["leagues"][0]["teams"]
+    pos = {}
+    for t in teams: pos.update(parse_roster(fetch(f"{BASE}/teams/{t['team']['id']}/roster", tries=2)))
+    if pos: store["pos"] = {str(k): v for k, v in pos.items()}; store["posTs"] = time.time()
+
+def dvp(games, pos, last=15, min_games=3):
+    """Defense vs position: stats a team ALLOWS per game to players at a position (and to guards/forwards/centers as groups),
+    over its last N games, with rank among teams (1 = allows the most). Only players with a known position are counted."""
+    keys = set(pos.values()) | {POSG[v] for v in pos.values() if v in POSG}
+    cells, tot, known = {}, 0, 0
+    for g in games.values():
+        sums = {(sd, k): [0] * 11 for sd in ("a", "h") for k in keys}
+        for r_ in g["p"]:
+            tot += r_[3]; p = pos.get(r_[0])
+            if not p: continue
+            known += r_[3]; sd = "h" if r_[2] == g["h"] else "a"; v = stat_vec(r_)
+            for k in (p, POSG.get(p)):
+                if k: sums[(sd, k)] = [x + y for x, y in zip(sums[(sd, k)], v)]
+        for (sd, k), v in sums.items():
+            cells.setdefault((g["a"] if sd == "h" else g["h"], k), []).append((g["d"], v))  # players on side sd face the other team's defense
+    out = {}
+    for (team, k), L in cells.items():
+        L = sorted(L, key=lambda x: x[0], reverse=True)[:last]
+        if len(L) >= min_games: out.setdefault(team, {})[k] = {"n": len(L), "v": {KEYS[i]: round(sum(x[1][i] for x in L) / len(L), 1) for i in range(11)}, "r": {}}
+    for k in keys:
+        teams = [t for t in out if k in out[t]]
+        for i, name in enumerate(KEYS):
+            for rank, t in enumerate(sorted(teams, key=lambda t: out[t][k]["v"][name], reverse=True), 1):
+                out[t][k]["r"][name] = rank; out[t][k]["of"] = len(teams)
+    out["_cov"] = round(known / tot, 2) if tot else None
+    return out
+
 def poss(t): return t[0] + 0.44 * t[1] - t[2] + t[4]  # FGA + .44 FTA - OREB + TOV
 
 def team_context(games, last=15):
@@ -84,13 +134,13 @@ def team_context(games, last=15):
     if not teams: return {}, None, None
     return teams, sum(t["pace"] for t in teams.values()) / len(teams), sum(t["def"] for t in teams.values()) / len(teams)
 
-def build_players(games, now):
+def build_players(games, now, types=None, pos=None):
     P = {}
     for gid, g in sorted(games.items(), key=lambda kv: kv[1]["d"], reverse=True):
         for r in g["p"]:
-            p = P.setdefault(r[0], {"id": r[0], "name": r[1], "team": r[2], "logs": [], "_u": []})
+            p = P.setdefault(r[0], {"id": r[0], "name": r[1], "team": r[2], "pos": (pos or {}).get(r[0]), "logs": [], "_u": []})
             opp = g["a"] if r[2] == g["h"] else g["h"]
-            p["logs"].append([g["d"], opp, 1 if r[2] == g["h"] else 0, r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], gid])
+            p["logs"].append([g["d"], opp, 1 if r[2] == g["h"] else 0, r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], gid, (types or {}).get(gid)])  # last field: season type 2=regular 3=playoffs 5=play-in (None=unknown)
             tt = g["t"].get(r[2])
             if tt and len(p["_u"]) < 15: p["_u"].append((r[11] + 0.44 * r[12] + r[10], r[3], tt[0] + 0.44 * tt[1] + tt[4], 48 + 5 * max(0, g["per"] - 4)))
     out, cutoff = [], (now - dt.timedelta(days=150)).strftime("%Y-%m-%d")
@@ -111,15 +161,27 @@ def list_days(days, today):
     def one(d):
         try: return d, fetch(f"{BASE}/scoreboard?dates={d:%Y%m%d}", tries=2)
         except RuntimeError as e: return d, e
-    known, done, errs = {}, [], []
+    known, types, done, errs = {}, {}, [], []
     with ThreadPoolExecutor(6) as ex:
         for d, j in ex.map(one, days):
             if isinstance(j, Exception): errs.append(str(j)); continue
             evs = (j or {}).get("events", [])
             for e in evs:
-                if e["status"]["type"].get("completed") and (e.get("season") or {}).get("type", 2) != 1: known[e["id"]] = e["date"]  # skip preseason
+                if e["status"]["type"].get("completed") and (e.get("season") or {}).get("type", 2) != 1: known[e["id"]] = e["date"]; types[e["id"]] = (e.get("season") or {}).get("type", 2)  # skip preseason
             if d < today and all(e["status"]["type"].get("completed") for e in evs): done.append(d.isoformat())
-    return known, done, errs
+    return known, types, done, errs
+
+def slate(today):
+    games = []
+    for off in (-1, 0, 1):
+        d = today + dt.timedelta(days=off)
+        try: b = fetch(f"{BASE}/scoreboard?dates={d:%Y%m%d}")
+        except RuntimeError as e: print(f"  scoreboard {d} failed:", e, file=sys.stderr); continue
+        for ev in (b or {}).get("events", []):
+            c = {x["homeAway"]: x for x in ev["competitions"][0]["competitors"]}; stt = ev["status"]["type"]
+            games.append({"id": ev["id"], "date": d.isoformat(), "day": off, "status": {"pre": 1, "in": 2, "post": 3}.get(stt.get("state"), 1), "statusText": stt.get("shortDetail", ""), "startUTC": ev["date"],
+                          "home": {"tri": tri(c["home"]["team"]["abbreviation"]), "score": num(c["home"].get("score"))}, "away": {"tri": tri(c["away"]["team"]["abbreviation"]), "score": num(c["away"].get("score"))}})
+    return games
 
 DAYS_PER_RUN = int(os.environ.get("DAYS_PER_RUN", "90"))
 
@@ -128,11 +190,12 @@ def main():
     os.makedirs("data", exist_ok=True)
     try: store = json.load(open("data/store.json"))
     except Exception: store = {}
-    store.setdefault("games", {}); store.setdefault("missing", []); store.setdefault("known", {}); store.setdefault("days", [])
+    if "ty" not in store: store["days"] = []; store.pop("prevDone", None)  # one-time: re-scan days to learn each game's season type
+    store.setdefault("ty", {}); store.setdefault("games", {}); store.setdefault("missing", []); store.setdefault("known", {}); store.setdefault("days", [])
     sy = today.year if today.month >= 10 else today.year - 1
     def scan(days):
-        known, done, errs = list_days(days, today)
-        store["known"].update(known); store["days"] = sorted(set(store["days"]) | set(done))
+        known, types, done, errs = list_days(days, today)
+        store["known"].update(known); store["ty"].update(types); store["days"] = sorted(set(store["days"]) | set(done))
         for e in errs[:2]: print("  day failed:", e, file=sys.stderr)
         if days and len(errs) == len(days): raise RuntimeError("every schedule request failed; keeping previous data")
     seen = set(store["days"])
@@ -163,17 +226,15 @@ def main():
     if not store["games"]: raise RuntimeError("no games stored yet (season may not have started)")
     cur = {k: v for k, v in store["games"].items() if v["d"] >= f"{sy}-10-01"}
     teams, lgPace, lgDef = team_context(cur)
-    players = build_players(store["games"], now)
-    ctx = {"updated": stamp, "scoreDate": str(today), "teams": teams, "lgPace": lgPace, "lgDef": lgDef,
+    try: get_positions(store)
+    except Exception as e: print("positions unavailable (keeping previous):", e, file=sys.stderr)
+    pos = {int(k): v for k, v in store.get("pos", {}).items()}
+    players = build_players(store["games"], now, store["ty"], pos)
+    ctx = {"updated": stamp, "scoreDate": str(today), "teams": teams, "lgPace": lgPace, "lgDef": lgDef, "dvp": dvp(cur, pos) if pos else {},
            "injuries": {"ok": False, "items": [], "updated": None, "source": "ESPN public injury feed (unofficial)"}}
-    try:  # today's scoreboard (live status)
-        b = fetch(f"{BASE}/scoreboard"); ctx["scoreDate"] = ((b.get("day") or {}).get("date")) or ctx["scoreDate"]
-        games = []
-        for ev in b["events"]:
-            c = {x["homeAway"]: x for x in ev["competitions"][0]["competitors"]}; stt = ev["status"]["type"]
-            games.append({"id": ev["id"], "status": {"pre": 1, "in": 2, "post": 3}.get(stt.get("state"), 1), "statusText": stt.get("shortDetail", ""), "startUTC": ev["date"],
-                          "home": {"tri": tri(c["home"]["team"]["abbreviation"]), "score": num(c["home"].get("score"))}, "away": {"tri": tri(c["away"]["team"]["abbreviation"]), "score": num(c["away"].get("score"))}})
-        json.dump({"updated": stamp, "scoreDate": ctx["scoreDate"], "games": games}, open("data/games.json", "w"), separators=(",", ":"))
+    try:  # yesterday's results, today's and tomorrow's games (ET dates) with live status
+        games = slate(today)
+        if games: json.dump({"updated": stamp, "scoreDate": str(today), "games": games}, open("data/games.json", "w"), separators=(",", ":"))
     except Exception as e:
         print("scoreboard unavailable (keeping previous games.json):", e, file=sys.stderr)
     try:

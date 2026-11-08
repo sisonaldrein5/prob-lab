@@ -65,6 +65,10 @@ function withWithout(p, mate, f) { // player's stat in games with vs without a t
   const wi = win.filter(l => ids.has(l[11])).map(f), wo = win.filter(l => !ids.has(l[11])).map(f);
   return {nWith: wi.length, nWithout: wo.length, mWith: wi.length ? mean(wi) : null, mWithout: wo.length ? mean(wo) : null};
 }
+function mateSplit(p, mate) { // games in the window both logs cover; "with" = teammate has box-score minutes in that game
+  const ids = new Set(mate.logs.map(l => l[11])), win = p.logs.filter(l => l[0] >= mate.logs[mate.logs.length - 1][0]);
+  return {w: win.filter(l => ids.has(l[11])), wo: win.filter(l => !ids.has(l[11]))};
+}
 // sit: {opp, home, teams, lgDef, scoreDate, out:[{p, status}]}. Every factor is a small, capped, shrunk heuristic (not backtested).
 function ctxFactors(p, propKey, sit) {
   const fs = [], P = PROPS[propKey], f = P.f, all = p.logs, T = sit.teams || {}, A = T[p.team], B = T[sit.opp], mates = [];
@@ -88,4 +92,4 @@ function ctxFactors(p, propKey, sit) {
   if (use) fs.push({name: "Teammate out", f: 1 + clamp(use.nWithout / (use.nWithout + 10) * (use.mWithout / use.mWith - 1), -0.15, 0.15), note: `${use.name} (${use.status}): ${use.mWithout.toFixed(1)} avg in ${use.nWithout} games without him vs ${use.mWith.toFixed(1)} in ${use.nWith} with`});
   return {factors: fs, mates};
 }
-if (typeof module !== "undefined") module.exports = {ctxFactors, withWithout, norm, addDay, PROPS, result, hitRate, streak, describe, probabilities, predict, mean, median, sd};
+if (typeof module !== "undefined") module.exports = {mateSplit, ctxFactors, withWithout, norm, addDay, PROPS, result, hitRate, streak, describe, probabilities, predict, mean, median, sd};
