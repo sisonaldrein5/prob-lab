@@ -1,0 +1,91 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Prop Lab · NBA player props</title>
+<style>
+:root{--bg:#0d1017;--panel:#151a23;--line:#262e3d;--tx:#e8ebf1;--mut:#8a94a6;--acc:#f2a541;--hit:#43c08a;--miss:#e5645a;--push:#8a94a6;color-scheme:dark}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:baseline;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--line)}
+h1{font:700 22px Georgia,serif;margin:0}h2{font-size:15px;margin:0 0 10px}small,.mut{color:var(--mut)}
+main{display:grid;grid-template-columns:320px 1fr;gap:16px;padding:16px 20px;max-width:1400px;margin:auto}
+@media(max-width:900px){main{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:16px}
+input,select,button{background:#0d1017;color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:8px 10px;font:inherit;max-width:100%}
+button{cursor:pointer}button:hover,button.on{border-color:var(--acc)}:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.game{display:flex;justify-content:space-between;padding:8px;border-radius:6px;cursor:pointer;border:1px solid transparent}.game:hover,.game.on{border-color:var(--acc)}
+.live{color:var(--miss);font-weight:600}.plist{max-height:420px;overflow:auto}.pl{display:flex;gap:10px;align-items:center;padding:6px;border-radius:6px;cursor:pointer}
+.pl:hover,.pl.on{background:#1d2431}.pl img{width:44px;height:32px;object-fit:cover;border-radius:4px;background:#222}
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:12px}
+table{width:100%;border-collapse:collapse}th,td{padding:5px 8px;border-bottom:1px solid var(--line);text-align:left}td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+.HIT{color:var(--hit);font-weight:600}.MISS{color:var(--miss);font-weight:600}.PUSH{color:var(--push);font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px}.k{background:#0d1017;border:1px solid var(--line);border-radius:6px;padding:8px}.k b{display:block;font-size:20px}
+.meter{height:14px;border-radius:7px;background:linear-gradient(90deg,var(--miss),#c9a23c,var(--hit));position:relative;margin:10px 0}.meter i{position:absolute;top:-4px;width:4px;height:22px;background:#fff;border-radius:2px}
+.warn{border-left:3px solid var(--acc);padding:6px 10px;background:#1d1a12;margin-bottom:12px}.tbl{overflow-x:auto}
+</style></head><body>
+<header><h1>Prop Lab</h1><div><span id="sync" class="mut">Loading…</span> <button id="refresh" title="Reload data">Reload</button></div></header>
+<main><aside>
+ <div class="card"><h2>Today’s games</h2><div id="games" class="mut">Loading…</div></div>
+ <div class="card"><h2>Players</h2><div class="row"><input id="q" placeholder="Search player or team" style="flex:1"><button id="favOnly" title="Show favorites only">★</button></div><div id="plist" class="plist"></div></div>
+</aside><section id="detail"><div class="card mut">Pick a player to see hit rates, head-to-head history and the model estimate.</div></section></main>
+<script src="stats.js"></script>
+<script>
+const $=id=>document.getElementById(id);let X={teams:{},injuries:{ok:false,items:[]}},LN={lines:{}},D={players:[],updated:null},G={games:[]},sel=null,gameFilter=null,favOnly=false,fav=new Set();
+try{fav=new Set(JSON.parse(localStorage.getItem("fav")||"[]"))}catch(e){}
+const pct=x=>x==null?"—":Math.round(x*100)+"%",f1=x=>x==null?"—":(Math.round(x*10)/10).toString();
+const st={prop:"PTS",line:null,opp:"",n:20};
+async function load(){
+ try{const j=u=>fetch(u+"?"+Date.now()).then(r=>r.json());const [p,g,x,l]=await Promise.all([j("data/players.json"),j("data/games.json"),j("data/context.json").catch(()=>X),j("data/lines.json").catch(()=>LN)]);D=p;G=g;X=x;LN=l;}
+ catch(e){$("sync").textContent="Could not load data files";return}
+ const age=D.updated?(Date.now()-new Date(D.updated))/60000:null;
+ $("sync").innerHTML=D.updated?`Last sync ${new Date(D.updated).toLocaleString()}${age>90?' <b class="live">· data may be stale</b>':''}${X.injuries&&X.injuries.ok?` · injuries ${new Date(X.injuries.updated).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"})}`:' · injuries unavailable'}${LN.updated?` · lines ${new Date(LN.updated).toLocaleString([],{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"})}`:''}`:"No data synced yet — run sync.py";
+ renderGames();renderList();if(sel)renderDetail();
+}
+function renderGames(){
+ if(!G.games.length){$("games").textContent=D.updated?"No games on today’s scoreboard.":"No data yet.";return}
+ const stale=(Date.now()-new Date(G.updated))/60000>10;
+ $("games").innerHTML=G.games.map(g=>{const live=g.status===2&&!stale,t=new Date(g.startUTC).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"});
+  const s=g.status===1?t:g.status===2?(stale?"Live (stale)":g.statusText):"Final";
+  return `<div class="game ${gameFilter===g.id?'on':''}" data-id="${g.id}"><span>${g.away.tri} @ ${g.home.tri}</span><span class="${live?'live':'mut'}">${g.status>1?`${g.away.score}–${g.home.score} `:''}${s}</span></div>`}).join("");
+ document.querySelectorAll(".game").forEach(e=>e.onclick=()=>{gameFilter=gameFilter===e.dataset.id?null:e.dataset.id;renderGames();renderList()});
+}
+const injOf=p=>X.injuries&&X.injuries.ok?X.injuries.items.find(i=>norm(i.name)===norm(p.name)):null;
+const outMates=()=>X.injuries&&X.injuries.ok?X.injuries.items.filter(i=>/out|doubtful/i.test(i.status)).map(i=>({p:D.players.find(p=>norm(p.name)===norm(i.name)),status:i.status})).filter(o=>o.p):[];
+function todayOpp(team){const g=G.games.find(g=>g.home.tri===team||g.away.tri===team);return g?{opp:g.home.tri===team?g.away.tri:g.home.tri,home:g.home.tri===team}:null}
+function renderList(){
+ const q=$("q").value.toLowerCase(),gm=G.games.find(g=>g.id===gameFilter);
+ const L=D.players.filter(p=>(!q||p.name.toLowerCase().includes(q)||p.team.toLowerCase()===q)&&(!gm||[gm.home.tri,gm.away.tri].includes(p.team))&&(!favOnly||fav.has(p.id)))
+  .sort((a,b)=>b.logs.slice(0,10).reduce((s,l)=>s+l[4],0)-a.logs.slice(0,10).reduce((s,l)=>s+l[4],0)).slice(0,80);
+ $("plist").innerHTML=L.map(p=>`<div class="pl ${sel&&sel.id===p.id?'on':''}" data-id="${p.id}"><img loading="lazy" alt="" src="https://a.espncdn.com/i/headshots/nba/players/full/${p.id}.png" onerror="this.style.visibility='hidden'"><div><b>${p.name}</b><br><small>${p.team}${todayOpp(p.team)?` · today vs ${todayOpp(p.team).opp}`:''}${injOf(p)?` · <span class="${/out/i.test(injOf(p).status)?'MISS':'PUSH'}">${injOf(p).status}</span>`:''}</small></div><span style="margin-left:auto">${fav.has(p.id)?'★':''}</span></div>`).join("")||'<span class="mut">No players match.</span>';
+ document.querySelectorAll(".pl").forEach(e=>e.onclick=()=>{sel=D.players.find(p=>p.id==e.dataset.id);const t=todayOpp(sel.team);st.opp=t?t.opp:"";st.line=null;renderList();renderDetail()});
+}
+function chart(logs,line,P){const L=logs.slice(0,st.n).reverse(),v=L.map(l=>P.f(l)),max=Math.max(line,...v)*1.15||1,w=Math.max(10,Math.min(26,600/L.length)),H=160;
+ return `<svg viewBox="0 0 ${L.length*(w+4)+8} ${H+22}" width="100%" role="img" aria-label="Game results versus line">`+v.map((x,i)=>{const h=x/max*H,c={HIT:"var(--hit)",MISS:"var(--miss)",PUSH:"var(--push)"}[result(x,line)];
+ return `<rect x="${4+i*(w+4)}" y="${H-h}" width="${w}" height="${h}" fill="${c}" rx="2"><title>${L[i][0]} vs ${L[i][1]}: ${x}</title></rect><text x="${4+i*(w+4)+w/2}" y="${H+14}" font-size="9" fill="#8a94a6" text-anchor="middle">${x}</text>`}).join("")+
+ `<line x1="0" x2="100%" y1="${H-line/max*H}" y2="${H-line/max*H}" stroke="#f2a541" stroke-dasharray="4 3"/></svg>`}
+function hitTable(rows,line,P){return `<div class="tbl"><table><tr><th>Date</th><th>Opp</th><th>H/A</th><th class="n">Min</th><th class="n">Actual</th><th class="n">Line</th><th>Result</th></tr>`+rows.map(l=>{const v=P.f(l),r=result(v,line);return `<tr><td>${l[0]}</td><td>${l[1]}</td><td>${l[2]?'H':'A'}</td><td class="n">${f1(l[3])}</td><td class="n">${v}</td><td class="n">${line}</td><td class="${r}">${r}</td></tr>`}).join("")+`</table></div>`}
+function renderDetail(){
+ const p=sel,P=PROPS[st.prop],all=p.logs,t=todayOpp(p.team),vals=all.map(P.f);
+ const ln=LN.lines&&LN.lines[norm(p.name)+'|'+st.prop];if(st.line==null&&ln)st.line=ln.line;if(st.line==null)st.line=Math.round(mean(vals.slice(0,20))*2)/2-0.5>0?Math.floor(mean(vals.slice(0,20)))+0.5:0.5;
+ const line=st.line,opps=[...new Set(D.players.flatMap(x=>x.logs.map(l=>l[1])))].sort();
+ const rows=all.slice(0,st.n),h2h=st.opp?all.filter(l=>l[1]===st.opp):[],hv=h2h.map(P.f),isHome=t?t.home:true;
+ const cx=ctxFactors(p,st.prop,{opp:st.opp,home:isHome,teams:X.teams,lgDef:X.lgDef,scoreDate:X.scoreDate,out:outMates()}),pr=predict(all,st.prop,line,isHome,cx.factors),inj=injOf(p),d=describe(rows.map(P.f)),hd=describe(hv),sk=streak(vals,line);
+ const hr=n=>{const r=hitRate(vals.slice(0,n),line);return r.n?`${pct(r.pct)} <small>(${r.hit}/${r.n}${r.push?`, ${r.push} push`:''})</small>`:"—"};
+ const hh=(n)=>{const r=hitRate(hv.slice(0,n),line);return r.n?`${pct(r.pct)} <small>(${r.hit}/${r.n})</small>`:"—"};
+ $("detail").innerHTML=`<div class="card"><div class="row"><img alt="" style="width:80px;height:58px;border-radius:6px" src="https://a.espncdn.com/i/headshots/nba/players/full/${p.id}.png" onerror="this.style.visibility='hidden'"><div><h2 style="font-size:20px;margin:0">${p.name} <button id="star">${fav.has(p.id)?'★ Saved':'☆ Save'}</button></h2><span class="mut">${p.team}${t?` · today ${t.home?'vs':'@'} ${t.opp}`:' · no game today'} · ${all.length} games on file</span></div></div>
+ <div class="row"><label>Prop <select id="prop">${Object.entries(PROPS).map(([k,x])=>`<option value="${k}" ${k===st.prop?'selected':''}>${x.label}</option>`).join("")}</select></label>
+ <label>Line <input id="line" type="number" step="0.5" min="0" value="${line}" style="width:80px"></label>
+ <label>Games <select id="n">${[5,10,15,20,30].map(n=>`<option ${n===st.n?'selected':''}>${n}</option>`).join("")}</select></label>
+ <label>Opponent <select id="opp"><option value="">None</option>${opps.map(o=>`<option ${o===st.opp?'selected':''}>${o}</option>`).join("")}</select></label></div>
+ ${inj&&/out|doubtful|questionable|day/i.test(inj.status)?`<div class="warn"><b>${p.name} is listed ${inj.status}.</b> ${inj.detail||''} <small>(ESPN injury feed, unofficial — confirm with the team before relying on it.)</small></div>`:''}${ln?`<div class="mut" style="margin-bottom:8px">Line ${ln.line} from ${ln.book} (${ln.game}) ${ln.over!=null?` · Over ${ln.over>0?'+':''}${ln.over}`:''}</div>`:`<div class="mut" style="margin-bottom:8px">No sportsbook line on file for this prop — enter one manually.</div>`}${pr?`<div class="warn"><b>Model estimate for Over ${line}: ${pct(pr.over)}</b>${pr.push>0.005?` · push ${pct(pr.push)}`:''} · confidence <b>${pr.conf}</b> (${pr.n} games). Expected ${f1(pr.mu)} ± ${f1(pr.sd)}. This is a statistical estimate, not a guarantee, and it is separate from the historical hit rates below. ${cx.factors.length?'Adjusted for the factors listed below.':'No context adjustments applied (opponent not set or team data unavailable).'} Adjustments are capped heuristics and have not been backtested.</div><div class="meter" aria-hidden="true"><i style="left:calc(${pr.over*100}% - 2px)"></i></div>`:'<div class="warn">Fewer than 5 games on file — no model estimate.</div>'}
+ <h2>Historical hit rate</h2><div class="grid">${[5,10,15,20,30].map(n=>`<div class="k"><small>Last ${n}</small><b>${hr(n).split(" <")[0]}</b><small>${hr(n).includes("<small>")?hr(n).split("<small>")[1].replace("</small>",""):""}</small></div>`).join("")}
+ <div class="k"><small>Streak</small><b class="${sk&&sk.type}">${sk?sk.len+" "+sk.type:"—"}</b></div></div></div>
+ <div class="card"><h2>Context and adjustments</h2>${cx.factors.length?`<div class="tbl"><table><tr><th>Factor</th><th class="n">Effect on expected ${P.label.toLowerCase()}</th><th>Basis</th></tr>${cx.factors.map(f=>`<tr><td>${f.name}</td><td class="n ${f.f>1.001?'HIT':f.f<0.999?'MISS':'PUSH'}">${f.f>=1?'+':''}${((f.f-1)*100).toFixed(1)}%</td><td>${f.note}</td></tr>`).join("")}</table></div>`:'<span class="mut">Team context unavailable — set an opponent, or wait for the next sync.</span>'}
+ <p class="mut">Usage rate: ${p.usg!=null?pct(p.usg):'unavailable'} · avg minutes last 10: ${f1(mean(all.slice(0,10).map(l=>l[3])))}${X.injuries&&X.injuries.ok?'':' · injury data unavailable'}</p>
+ ${cx.mates.length?`<h2>Teammates listed out or doubtful</h2><div class="tbl"><table><tr><th>Player</th><th>Status</th><th class="n">${P.label} without</th><th class="n">with</th></tr>${cx.mates.map(m=>`<tr><td>${m.name}</td><td>${m.status}</td><td class="n">${m.mWithout!=null?f1(m.mWithout)+' ('+m.nWithout+' g)':'—'}</td><td class="n">${m.mWith!=null?f1(m.mWith)+' ('+m.nWith+' g)':'—'}</td></tr>`).join("")}</table></div><p class="mut">Needs at least 3 games both with and without a teammate to adjust the estimate.</p>`:'<p class="mut">No injured teammates found'+(X.injuries&&X.injuries.ok?'.':' (injury data unavailable).')+'</p>'}</div>
+ <div class="card"><h2>Last ${st.n} games · ${P.label} vs ${line}</h2>${d?`<div class="grid" style="margin-bottom:10px"><div class="k"><small>Average</small><b>${f1(d.mean)}</b></div><div class="k"><small>Median</small><b>${f1(d.median)}</b></div><div class="k"><small>High / low</small><b>${d.max} / ${d.min}</b></div><div class="k"><small>Std. dev.</small><b>${f1(d.sd)}</b></div></div>`:''}${chart(all,line,P)}<div style="margin-top:10px">${hitTable(rows,line,P)}</div></div>
+ <div class="card"><h2>Head-to-head${st.opp?` vs ${st.opp}`:''}</h2>${!st.opp?'<span class="mut">Choose an opponent.</span>':!h2h.length?`<span class="mut">No games vs ${st.opp} in the stored window (current + previous season).</span>`:`<p class="mut">Sample: ${h2h.length} game${h2h.length>1?'s':''} on file — not padded or estimated.</p><div class="grid" style="margin-bottom:10px"><div class="k"><small>Last 3</small><b>${hh(3).split(" <")[0]}</b></div><div class="k"><small>Last 5</small><b>${hh(5).split(" <")[0]}</b></div><div class="k"><small>Last 10</small><b>${hh(10).split(" <")[0]}</b></div><div class="k"><small>Average</small><b>${f1(hd.mean)}</b></div><div class="k"><small>Median</small><b>${f1(hd.median)}</b></div><div class="k"><small>High / low</small><b>${hd.max} / ${hd.min}</b></div></div>${hitTable(h2h.slice(0,10),line,P)}`}</div>`;
+ $("prop").onchange=e=>{st.prop=e.target.value;st.line=null;renderDetail()};$("line").oninput=e=>{const v=parseFloat(e.target.value);if(!isNaN(v)){st.line=v;clearTimeout(window._t);window._t=setTimeout(()=>{renderDetail();$("line").focus();$("line").setSelectionRange(99,99)},250)}};
+ $("n").onchange=e=>{st.n=+e.target.value;renderDetail()};$("opp").onchange=e=>{st.opp=e.target.value;renderDetail()};
+ $("star").onclick=()=>{fav.has(p.id)?fav.delete(p.id):fav.add(p.id);try{localStorage.setItem("fav",JSON.stringify([...fav]))}catch(e){}renderList();renderDetail()};
+}
+$("q").oninput=renderList;$("favOnly").onclick=e=>{favOnly=!favOnly;e.target.classList.toggle("on",favOnly);renderList()};$("refresh").onclick=load;
+load();setInterval(load,60000);
+</script></body></html>
